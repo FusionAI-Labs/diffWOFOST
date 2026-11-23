@@ -591,3 +591,53 @@ def test_amax_slp_gradient_matches_numerical():
     _assert_scalar_gradient(
         lambda overrides: _assimilation_pgass(overrides, 2.0, 2.0), "AMAX_SLP", 20.0
     )
+
+
+def test_wofost81_assimilation_with_member_specific_weather():
+    """Radiation per member with a shared latitude matches one scalar day per member.
+
+    Day length and solar elevation come from the latitude and stay scalar, while
+    the radiation carries the batch axis.
+    """
+    from diffwofost.physical_models.config import ComputeConfig
+
+    ComputeConfig.set_dtype(torch.float64)
+    ComputeConfig.set_device("cpu")
+    # four members: with three, the batch axis would line up with the three Gauss points
+    irrad = (15e6, 6e6, 22e6, 0.0)
+    lai, n_amount_lv = 2.0, 40.0
+    batch = _wofost81_pgass_with_weather(torch.tensor(irrad, dtype=torch.float64), lai, n_amount_lv)
+    assert batch.shape == (len(irrad),)
+    for index, value in enumerate(irrad):
+        scalar = _wofost81_pgass_with_weather(value, lai, n_amount_lv)
+        torch.testing.assert_close(batch[index], scalar, rtol=1e-12, atol=0.0)
+
+
+def _wofost81_pgass_with_weather(irrad, lai, n_amount_lv):
+    """One day of WOFOST 8.1 assimilation for the given radiation."""
+    import datetime
+    from pcse.base.parameter_providers import ParameterProvider
+    from pcse.base.variablekiosk import VariableKiosk
+    from diffwofost.physical_models.crop.assimilation import WOFOST81_Assimilation
+
+    day = datetime.date(2010, 6, 1)
+    crop = {
+        "AMAX_LNB": 0.5,
+        "AMAX_REF": 40.0,
+        "AMAX_SLP": 20.0,
+        "KN": 0.5,
+        "CO2": 360.0,
+        "EFFTB": [0.0, 0.45, 40.0, 0.45],
+        "KDIFTB": [0.0, 0.6, 2.0, 0.6],
+        "TMPFTB": [0.0, 1.0, 40.0, 1.0],
+        "TMNFTB": [0.0, 1.0, 40.0, 1.0],
+        "CO2AMAXTB": [40.0, 0.0, 360.0, 1.0, 720.0, 1.2],
+        "CO2EFFTB": [40.0, 0.0, 360.0, 1.0, 720.0, 1.2],
+    }
+    kiosk = VariableKiosk()
+    states = {"DVS": 1.0, "LAI": lai, "NamountLV": n_amount_lv}
+    for name, value in states.items():
+        kiosk.register_variable(0, name, type="S", publish=True)
+        kiosk.set_variable(0, name, torch.tensor(value, dtype=torch.float64))
+    weather = {"IRRAD": irrad, "TEMP": 18.0, "DTEMP": 20.0, "TMIN": 10.0, "LAT": 52.0}
+    return WOFOST81_Assimilation(day, kiosk, ParameterProvider(cropdata=crop))(day, weather)
