@@ -271,6 +271,17 @@ def totass8(
     pi = consts["pi"]
     mask = (lai > 0) & (dayl > 0)
     dsinbe_safe = torch.where(dsinbe > epsilon, dsinbe, torch.ones_like(dsinbe))
+    # Day length and solar elevation follow the latitude and can be scalar while
+    # the radiation is batched (weather per member), and the canopy can be
+    # scalar while the weather is not. Bring them to one shape, so the Gauss
+    # points stay on their own leading axis in totass8 and assim8.
+    inputs = (dayl, sinld, cosld, avrad, difpp, dsinbe_safe, lai, nlv)
+    shape = torch.broadcast_shapes(*(torch.as_tensor(item).shape for item in inputs))
+    if shape:
+        dayl, sinld, cosld, avrad, difpp, dsinbe_safe, lai, nlv = (
+            torch.as_tensor(item, dtype=dtype, device=device).expand(shape) for item in inputs
+        )
+        mask = mask.expand(shape)
     ndim = dayl.dim()
     if ndim > 0:
         xg_v = xgauss.view(3, *([1] * ndim))
