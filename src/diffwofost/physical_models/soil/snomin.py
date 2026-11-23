@@ -569,20 +569,26 @@ class SNOMIN(SimulationObject):
             profile, amount_t, depth, cn_ratio, organic_fraction
         )
 
-        n_layers = len(profile)
-        zeros = torch.zeros((1, n_layers), dtype=self._dtype, device=self._device)
-        age_row = age.expand(1, n_layers)
+        # Pools are (amendment, layer, *batch). The new amendment row and the
+        # mineral rates take that layer and batch shape, also when the amounts
+        # are the same for every member.
+        layer_shape = self.states.NH4.shape
+        zeros = torch.zeros((1, *layer_shape), dtype=self._dtype, device=self._device)
+        age_row = age.expand(layer_shape[1:]).unsqueeze(0).expand(layer_shape).unsqueeze(0)
         self.states.AGE0 = torch.cat((self.states.AGE0, age_row), dim=0)
         self.states.ORGMAT = torch.cat((self.states.ORGMAT, zeros), dim=0)
         self.states.CORG = torch.cat((self.states.CORG, zeros), dim=0)
         self.states.NORG = torch.cat((self.states.NORG, zeros), dim=0)
         self.states.AGE = torch.cat((self.states.AGE, zeros), dim=0)
         self._RAGEAM = torch.cat((self._RAGEAM, age_row), dim=0)
-        self._RORGMATAM = torch.cat((self._RORGMATAM, org_am.unsqueeze(0) * _M2_TO_HA), dim=0)
-        self._RCORGAM = torch.cat((self._RCORGAM, corg_am.unsqueeze(0) * _M2_TO_HA), dim=0)
-        self._RNORGAM = torch.cat((self._RNORGAM, norg_am.unsqueeze(0) * _M2_TO_HA), dim=0)
-        self._RNH4AM = nh4_am * _M2_TO_HA
-        self._RNO3AM = no3_am * _M2_TO_HA
+        org_row = _to_layer_shape(org_am * _M2_TO_HA, layer_shape).unsqueeze(0)
+        corg_row = _to_layer_shape(corg_am * _M2_TO_HA, layer_shape).unsqueeze(0)
+        norg_row = _to_layer_shape(norg_am * _M2_TO_HA, layer_shape).unsqueeze(0)
+        self._RORGMATAM = torch.cat((self._RORGMATAM, org_row), dim=0)
+        self._RCORGAM = torch.cat((self._RCORGAM, corg_row), dim=0)
+        self._RNORGAM = torch.cat((self._RNORGAM, norg_row), dim=0)
+        self._RNH4AM = _to_layer_shape(nh4_am * _M2_TO_HA, layer_shape)
+        self._RNO3AM = _to_layer_shape(no3_am * _M2_TO_HA, layer_shape)
 
     def _check_mass_balances(self, day, delt):
         states = self.states
@@ -964,6 +970,12 @@ def _depth_share(application_depth, thickness, z_max, z_min):
             torch.zeros_like(application_depth),
         ),
     )
+
+
+def _to_layer_shape(value, layer_shape):
+    """Broadcast a per-layer value, (layer,) or (layer, *batch), to (layer, *batch)."""
+    missing = len(layer_shape) - value.dim()
+    return value.reshape(*value.shape, *([1] * missing)).expand(layer_shape)
 
 
 def _application_mineral(profile, amount, application_depth, f_nh4, f_no3):

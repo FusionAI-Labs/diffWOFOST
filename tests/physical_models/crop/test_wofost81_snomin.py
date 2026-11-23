@@ -226,8 +226,14 @@ def _run_pcse(output_vars, site_overrides=None, timed_events="null", n_days=None
     return reference.get_output()
 
 
-def _run_diff(overrides=None, timed_events="null", n_days=None):
+def _run_diff(overrides=None, timed_events="null", n_days=None, amounts=None):
+    """``amounts`` replaces the amount of the n-th timed event, e.g. with one value per member."""
     crop, soil, site, agro = _providers(timed_events)
+    if amounts is not None:
+        campaign = next(iter(agro[0].values()))
+        rows = [row for event in campaign["TimedEvents"] for row in event["events_table"]]
+        for row, amount in zip(rows, amounts, strict=True):
+            next(iter(row.values()))["amount"] = amount
     params = ParameterProvider(cropdata=crop, soildata=soil, sitedata=site)
     params.set_active_crop(_CROP_NAME, _VARIETY_NAME, "sowing", "harvest")
     for name, value in (overrides or {}).items():
@@ -567,3 +573,82 @@ def test_mixed_ifunrn_matches_independent_runs():
             diverged = True
             break
     assert diverged
+
+
+def _assert_members_match(batch, scalar_runs, names):
+    for index, scalar in enumerate(scalar_runs):
+        assert len(scalar) == len(batch)
+        for ref_day, batch_day in zip(scalar, batch, strict=True):
+            for name in names:
+                expected = _numbers(ref_day[name])
+                actual = _numbers(_member(batch_day[name], index))
+                for layer, (got, want) in enumerate(zip(actual, expected, strict=True)):
+                    assert _close(got, want, tol=1e-9), (
+                        index,
+                        name,
+                        ref_day["day"],
+                        layer,
+                        got,
+                        want,
+                    )
+
+
+_N_NAMES = ("LAI", "TAGP", "NAVAIL", "NuptakeTotal", "NH4", "NO3", *_PROFILE)
+
+
+def test_batched_nitrogen_application_matches_independent_runs():
+    """Amendments on a batched simulation give each member its own scalar trajectory.
+
+    The new amendment row and the mineral rates must carry the batch axis even
+    when the amendment itself is the same for every member.
+    """
+    ComputeConfig.set_dtype(torch.float64)
+    ComputeConfig.set_device("cpu")
+    events = _application_events()
+    crop, soil, site, _agro = _providers()
+    baseline = ParameterProvider(cropdata=crop, soildata=soil, sitedata=site)
+    knit = float(baseline["KNIT_REF"])
+    pair = (knit, knit * 4.0)
+    batch = _run_diff(
+        {"KNIT_REF": torch.tensor(pair, dtype=torch.float64)},
+        timed_events=events,
+        n_days=_SHORT_RUN,
+    )
+    scalar_runs = [
+        _run_diff(
+            {"KNIT_REF": torch.tensor(value, dtype=torch.float64)},
+            timed_events=events,
+            n_days=_SHORT_RUN,
+        )
+        for value in pair
+    ]
+    _assert_members_match(batch, scalar_runs, _N_NAMES)
+
+
+def test_member_specific_amendment_amounts_match_independent_runs():
+    """A tensor amount applies a different amendment to each batch member.
+
+    The batch shape comes from the parameters and the weather, so the members
+    share a batched parameter with the same value.
+    """
+    ComputeConfig.set_dtype(torch.float64)
+    ComputeConfig.set_device("cpu")
+    events = _application_events()
+    first = (100.0, 40.0)
+    second = (80.0, 0.0)
+    crop, soil, site, _agro = _providers()
+    knit = float(ParameterProvider(cropdata=crop, soildata=soil, sitedata=site)["KNIT_REF"])
+    batch = _run_diff(
+        {"KNIT_REF": torch.tensor((knit, knit), dtype=torch.float64)},
+        timed_events=events,
+        n_days=_SHORT_RUN,
+        amounts=[
+            torch.tensor(first, dtype=torch.float64),
+            torch.tensor(second, dtype=torch.float64),
+        ],
+    )
+    scalar_runs = [
+        _run_diff(timed_events=events, n_days=_SHORT_RUN, amounts=[first[i], second[i]])
+        for i in range(2)
+    ]
+    _assert_members_match(batch, scalar_runs, _N_NAMES)
